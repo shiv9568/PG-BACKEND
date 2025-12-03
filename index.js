@@ -84,11 +84,7 @@ const limiter = rateLimit({
 });
 app.use('/api', limiter); // Apply to all API routes
 
-// Connect to MongoDB
-console.log('Attempting to connect to MongoDB at:', process.env.MONGODB_URI ? 'URI from env' : 'Localhost fallback');
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/tajpg')
-.then(() => console.log('Connected to MongoDB'))
-.catch(err => console.error('Could not connect to MongoDB', err));
+// Database connection is handled at the end of the file
 
 // Routes
 
