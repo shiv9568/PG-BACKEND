@@ -1235,7 +1235,14 @@ app.get('/api/admin/fix-occupancy', async (req, res) => {
 });
 
 // Connect to MongoDB
+// Connect to MongoDB
 console.log('Attempting to connect to MongoDB at:', process.env.MONGODB_URI ? 'URI from env' : 'Localhost fallback');
+
+if (process.env.NODE_ENV === 'production' && !process.env.MONGODB_URI) {
+  console.error('FATAL ERROR: MONGODB_URI is not defined in this environment.');
+  process.exit(1);
+}
+
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/tajpg')
 .then(() => {
   console.log('Connected to MongoDB');
