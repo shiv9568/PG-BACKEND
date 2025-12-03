@@ -23,4 +23,4 @@ const pgSchema = new mongoose.Schema({
   caretakerContact: { type: String },
 }, { timestamps: true });
 
-module.exports = mongoose.model('Pg', pgSchema);
+module.exports = mongoose.model('Pg', pgSchema, 'pg');
