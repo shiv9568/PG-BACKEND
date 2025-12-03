@@ -12,6 +12,8 @@ const paymentSchema = new mongoose.Schema({
   month: { type: String }, // e.g., "December 2025"
   transactionId: { type: String },
   screenshotUrl: { type: String },
+  lastReminded: { type: Date },
+  reminderMessage: { type: String }
 }, { timestamps: true });
 
 module.exports = mongoose.model('Payment', paymentSchema);

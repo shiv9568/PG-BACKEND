@@ -5,8 +5,11 @@ const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
-  role: { type: String, enum: ['user', 'admin', 'caretaker'], default: 'user' },
+  role: { type: String, enum: ['user', 'admin', 'caretaker', 'superadmin'], default: 'user' },
   phoneNumber: { type: String },
+  address: { type: String },
+  guardianName: { type: String },
+  guardianPhone: { type: String },
   assignedPgId: { type: String }, // For caretakers
   
   // KYC Fields

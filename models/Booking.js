@@ -9,6 +9,7 @@ const bookingSchema = new mongoose.Schema({
   checkInDate: { type: Date },
   paymentStatus: { type: String, enum: ['Paid', 'Pending', 'Overdue'], default: 'Pending' },
   rentAmount: { type: Number },
+  roomNo: { type: String },
   nextPaymentDate: { type: Date },
 }, { timestamps: true });
 

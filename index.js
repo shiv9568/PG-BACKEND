@@ -8,15 +8,18 @@ const Pg = require('./models/Pg');
 const User = require('./models/User');
 const Complaint = require('./models/Complaint');
 const jwt = require('jsonwebtoken');
-const { protect, admin, caretaker } = require('./middleware/authMiddleware');
+const { protect, admin, superAdmin, caretaker } = require('./middleware/authMiddleware');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const rateLimit = require('express-rate-limit');
+const sharp = require('sharp');
 
 const Notice = require('./models/Notice');
 const Visitor = require('./models/Visitor');
 const Rating = require('./models/Rating');
 const Payment = require('./models/Payment');
+const EntryLog = require('./models/EntryLog');
 
 // Ensure uploads directory exists
 const uploadDir = path.join(__dirname, 'uploads');
@@ -73,6 +76,14 @@ app.use(cors());
 app.use(bodyParser.json());
 app.use('/uploads', express.static('uploads'));
 
+// Rate Limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later'
+});
+app.use('/api', limiter); // Apply to all API routes
+
 // Connect to MongoDB
 console.log('Attempting to connect to MongoDB at:', process.env.MONGODB_URI ? 'URI from env' : 'Localhost fallback');
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/tajpg')
@@ -88,7 +99,39 @@ app.get('/', (req, res) => {
 // PG Routes
 app.get('/api/pgs', async (req, res) => {
   try {
-    const pgs = await Pg.find().sort({ createdAt: -1 });
+    let query = {};
+    
+    // If user is logged in and is an admin (but not superadmin), only show their PGs
+    // We need to handle the case where this might be a public request (no token) vs an admin request
+    // For now, let's assume public requests show all PGs (for listing), 
+    // but we might want to filter if we had a "my-pgs" endpoint.
+    // However, the requirement is "manage multiple PG instances".
+    
+    // Let's check if there is a token to decide context, or rely on a specific query param or endpoint.
+    // Simpler approach: If the user is authenticated as an admin, we filter.
+    // But this is a public route too.
+    // Let's keep this public for now.
+    // We'll create a separate endpoint or logic for "My PGs" if needed, 
+    // or just filter on the frontend if we send all.
+    // BUT, for security, admins shouldn't see other admins' PGs details if they are private.
+    // Given the current app structure, let's modify this to support filtering if a query param is present,
+    // or better, check the token manually if present.
+    
+    const token = req.headers.authorization?.split(' ')[1];
+    if (token) {
+        try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+            const user = await User.findOne({ id: decoded.id });
+            if (user && user.role === 'admin') {
+                query = { adminId: user.id };
+            }
+            // Superadmin sees all (empty query)
+        } catch (e) {
+            // Ignore token error, treat as public
+        }
+    }
+
+    const pgs = await Pg.find(query).sort({ createdAt: -1 });
     res.json(pgs);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -98,7 +141,8 @@ app.get('/api/pgs', async (req, res) => {
 app.post('/api/pgs', protect, admin, async (req, res) => {
   const newPg = new Pg({
     ...req.body,
-    id: req.body.id || `pg-${Date.now()}`
+    id: req.body.id || `pg-${Date.now()}`,
+    adminId: req.user.role === 'superadmin' ? (req.body.adminId || req.user.id) : req.user.id
   });
 
   try {
@@ -214,6 +258,16 @@ const Booking = require('./models/Booking');
 // Booking Routes
 app.post('/api/bookings', protect, async (req, res) => {
   try {
+    // Check if user already has an active booking
+    const existingBooking = await Booking.findOne({ 
+      userId: req.body.userId, 
+      status: { $in: ['Pending', 'Confirmed'] } 
+    });
+
+    if (existingBooking) {
+      return res.status(400).json({ message: 'You already have an active booking. You can only book one room at a time.' });
+    }
+
     // Fetch PG to get price if rentAmount is missing
     const pg = await Pg.findOne({ id: req.body.pgId });
     const rentAmount = req.body.rentAmount || (pg ? pg.price : 0);
@@ -306,7 +360,15 @@ app.delete('/api/bookings/:id', protect, admin, async (req, res) => {
 // Update PG (Admin only)
 app.put('/api/pgs/:id', protect, admin, async (req, res) => {
   try {
-    const updatedPg = await Pg.findOneAndUpdate({ id: req.params.id }, req.body, { new: true });
+    const query = { id: req.params.id };
+    if (req.user.role === 'admin') {
+        query.adminId = req.user.id;
+    }
+    
+    const updatedPg = await Pg.findOneAndUpdate(query, req.body, { new: true });
+    if (!updatedPg) {
+        return res.status(404).json({ message: 'PG not found or unauthorized' });
+    }
     res.json(updatedPg);
   } catch (error) {
     res.status(400).json({ message: error.message });
@@ -316,11 +378,87 @@ app.put('/api/pgs/:id', protect, admin, async (req, res) => {
 // Delete PG (Admin only)
 app.delete('/api/pgs/:id', protect, admin, async (req, res) => {
   try {
-    await Pg.findOneAndDelete({ id: req.params.id });
+    const query = { id: req.params.id };
+    if (req.user.role === 'admin') {
+        query.adminId = req.user.id;
+    }
+
+    const pg = await Pg.findOneAndDelete(query);
+    if (!pg) {
+        return res.status(404).json({ message: 'PG not found or unauthorized' });
+    }
     res.json({ message: 'PG removed' });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
+});
+
+// --- Super Admin Routes ---
+
+// Create a new Admin (Super Admin only)
+app.post('/api/superadmin/admins', protect, superAdmin, async (req, res) => {
+    const { name, email, password, phoneNumber } = req.body;
+    if (!name || !email || !password) {
+      return res.status(400).json({ message: 'All fields are required' });
+    }
+  
+    try {
+      const existingUser = await User.findOne({ email });
+      if (existingUser) {
+        return res.status(409).json({ message: 'User already exists' });
+      }
+  
+      const newAdmin = new User({
+        id: `admin-${Date.now()}`,
+        name,
+        email,
+        password, // In real app, hash this
+        role: 'admin',
+        phoneNumber
+      });
+  
+      await newAdmin.save();
+      
+      const { password: _, ...userWithoutPassword } = newAdmin.toObject();
+      res.status(201).json(userWithoutPassword);
+    } catch (error) {
+      res.status(500).json({ message: error.message });
+    }
+});
+
+// Get all Admins (Super Admin only)
+app.get('/api/superadmin/admins', protect, superAdmin, async (req, res) => {
+    try {
+        const admins = await User.find({ role: 'admin' });
+        res.json(admins);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// Super Admin Stats
+app.get('/api/superadmin/stats', protect, superAdmin, async (req, res) => {
+    try {
+        const totalPgs = await Pg.countDocuments();
+        const totalAdmins = await User.countDocuments({ role: 'admin' });
+        const totalUsers = await User.countDocuments({ role: 'user' });
+        
+        // Calculate Total Revenue
+        const revenueResult = await Booking.aggregate([
+            { $match: { paymentStatus: 'Paid' } },
+            { $group: { _id: null, total: { $sum: "$rentAmount" } } }
+        ]);
+        const totalRevenue = revenueResult[0] ? revenueResult[0].total : 0;
+
+        res.json({
+            totalPgs,
+            totalAdmins,
+            totalUsers,
+            totalRevenue
+        });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
 });
 
 // Update Booking Status (Admin/Caretaker)
@@ -492,6 +630,21 @@ const seedUsers = async () => {
   try {
     const adminEmail = 'admin@gmail.com';
     const caretakerEmail = 'caretaker@gmail.com';
+    const superAdminEmail = 'superadmin@gmail.com';
+
+    const superAdminExists = await User.findOne({ email: superAdminEmail });
+    if (!superAdminExists) {
+      const superAdminUser = new User({
+        id: `superadmin-${Date.now()}`,
+        name: 'Super Admin',
+        email: superAdminEmail,
+        password: 'superadmin123', // In real app, hash this
+        role: 'superadmin',
+        phoneNumber: '0000000000'
+      });
+      await superAdminUser.save();
+      console.log('Super Admin user created: superadmin@gmail.com / superadmin123');
+    }
 
     const adminExists = await User.findOne({ email: adminEmail });
     if (!adminExists) {
@@ -548,12 +701,42 @@ const recalculateOccupancy = async () => {
 };
 
 // --- File Upload Route ---
-app.post('/api/upload', protect, upload.single('file'), (req, res) => {
+// --- File Upload Route with Optimization ---
+app.post('/api/upload', protect, upload.single('file'), async (req, res) => {
   if (req.file) {
-    res.json({ 
-      message: 'File uploaded successfully', 
-      filePath: `/uploads/${req.file.filename}` 
-    });
+    try {
+      // Check if it's an image
+      if (req.file.mimetype.startsWith('image/')) {
+        const filename = `optimized-${Date.now()}.webp`;
+        const outputPath = path.join(uploadDir, filename);
+
+        await sharp(req.file.path)
+          .resize(800) // Resize to max width 800px
+          .webp({ quality: 80 }) // Convert to WebP with 80% quality
+          .toFile(outputPath);
+
+        // Delete original file to save space
+        fs.unlinkSync(req.file.path);
+
+        res.json({ 
+          message: 'File uploaded and optimized successfully', 
+          filePath: `/uploads/${filename}` 
+        });
+      } else {
+        // Non-image files (keep as is)
+        res.json({ 
+          message: 'File uploaded successfully', 
+          filePath: `/uploads/${req.file.filename}` 
+        });
+      }
+    } catch (error) {
+      console.error('Image optimization failed:', error);
+      // Fallback to original file if optimization fails
+      res.json({ 
+        message: 'File uploaded (optimization skipped)', 
+        filePath: `/uploads/${req.file.filename}` 
+      });
+    }
   } else {
     res.status(400).json({ message: 'No file uploaded' });
   }
@@ -569,7 +752,7 @@ app.get('/api/notices', async (req, res) => {
   }
 });
 
-app.post('/api/notices', protect, admin, async (req, res) => {
+app.post('/api/notices', protect, caretaker, async (req, res) => {
   try {
     const notice = new Notice(req.body);
     await notice.save();
@@ -583,7 +766,7 @@ app.post('/api/notices', protect, admin, async (req, res) => {
   }
 });
 
-app.delete('/api/notices/:id', protect, admin, async (req, res) => {
+app.delete('/api/notices/:id', protect, caretaker, async (req, res) => {
   try {
     await Notice.findByIdAndDelete(req.params.id);
     
@@ -601,10 +784,11 @@ app.get('/api/visitors', protect, async (req, res) => {
   try {
     let query = {};
     if (req.user.role === 'caretaker') {
-      // If caretaker has assignedPgId, filter by it. 
-      // For now, assuming caretaker sees all or we filter by their ID if we stored it.
-      // The Visitor model has caretakerId.
-      query = { caretakerId: req.user.id };
+      if (req.user.assignedPgId) {
+        query = { pgId: req.user.assignedPgId };
+      } else {
+        query = { caretakerId: req.user.id };
+      }
     } else if (req.user.role !== 'admin') {
       return res.status(403).json({ message: 'Not authorized' });
     }
@@ -649,6 +833,108 @@ app.put('/api/visitors/:id/checkout', protect, caretaker, async (req, res) => {
     }
   } catch (error) {
     res.status(500).json({ message: error.message });
+  }
+});
+
+app.delete('/api/visitors/:id', protect, caretaker, async (req, res) => {
+  try {
+    const visitor = await Visitor.findById(req.params.id);
+    if (visitor) {
+      await visitor.deleteOne();
+      res.json({ message: 'Visitor removed' });
+    } else {
+      res.status(404).json({ message: 'Visitor not found' });
+    }
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+app.delete('/api/visitors/clear-history', protect, caretaker, async (req, res) => {
+  try {
+    // Delete all visitors that have checked out (timeOut exists)
+    // Filter by caretaker's scope
+    let query = { timeOut: { $ne: null } };
+    
+    if (req.user.role === 'caretaker') {
+        if (req.user.assignedPgId) {
+            query.pgId = req.user.assignedPgId;
+        } else {
+            query.caretakerId = req.user.id;
+        }
+    }
+    
+    const result = await Visitor.deleteMany(query);
+    res.json({ message: `Cleared ${result.deletedCount} visitor records` });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+
+// --- QR Code Entry Routes ---
+
+// Generate QR Token (Resident)
+app.get('/api/user/qr-token', protect, async (req, res) => {
+  try {
+    // Token valid for 5 minutes
+    const qrToken = jwt.sign(
+      { userId: req.user.id, pgId: req.user.assignedPgId, timestamp: Date.now() },
+      process.env.JWT_SECRET || 'secret',
+      { expiresIn: '5m' }
+    );
+    res.json({ token: qrToken });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Scan QR Token (Caretaker)
+app.post('/api/gate/scan', protect, caretaker, async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ message: 'Token is required' });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
+    
+    // Find user to get details
+    const user = await User.findOne({ id: decoded.userId });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Determine entry/exit type based on last log
+    const lastLog = await EntryLog.findOne({ userId: decoded.userId }).sort({ createdAt: -1 });
+    const type = (lastLog && lastLog.type === 'Entry') ? 'Exit' : 'Entry';
+
+    const entryLog = new EntryLog({
+      userId: decoded.userId,
+      pgId: decoded.pgId || user.assignedPgId || 'General',
+      type: type,
+      scannedBy: req.user.id
+    });
+
+    await entryLog.save();
+
+    // Emit event for real-time updates if needed
+    const io = req.app.get('io');
+    io.emit('entryLogged', { log: entryLog, user: { name: user.name, roomNo: user.roomNo } });
+
+    res.json({ 
+      message: `${type} logged successfully`, 
+      user: { name: user.name, photo: user.photo || null },
+      type: type,
+      time: new Date()
+    });
+
+  } catch (error) {
+    console.error('Scan Error:', error);
+    if (error.name === 'TokenExpiredError') {
+      return res.status(400).json({ message: 'QR Code expired' });
+    }
+    // Return actual error message for debugging if it's not a JWT error
+    if (error.name === 'ValidationError') {
+        return res.status(400).json({ message: error.message });
+    }
+    res.status(400).json({ message: 'Invalid QR Code' });
   }
 });
 
@@ -772,6 +1058,105 @@ app.put('/api/payments/:id', protect, async (req, res) => {
     }
     
     res.json(payment);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+app.post('/api/payments/remind', protect, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin' && req.user.role !== 'caretaker') {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    const { type, id, message } = req.body;
+    let bookings = [];
+
+    if (type === 'user') {
+      bookings = await Booking.find({ userId: id, status: 'Confirmed' });
+    } else if (type === 'room') {
+      // Assuming 'room' means PG Listing
+      bookings = await Booking.find({ pgId: id, status: 'Confirmed' });
+    } else if (type === 'all') {
+      bookings = await Booking.find({ status: 'Confirmed' });
+    }
+
+    const month = new Date().toLocaleString('default', { month: 'long', year: 'numeric' });
+    const dueDate = new Date();
+    dueDate.setDate(dueDate.getDate() + 5);
+
+    let remindersSent = 0;
+    const io = req.app.get('io');
+
+    for (const booking of bookings) {
+      let payment = await Payment.findOne({ bookingId: booking._id, month });
+      
+      if (!payment) {
+        // Create new payment
+        payment = new Payment({
+          userId: booking.userId,
+          userName: booking.userName,
+          bookingId: booking._id,
+          pgId: booking.pgId,
+          amount: booking.rentAmount,
+          dueDate: dueDate,
+          month: month,
+          status: 'Pending',
+          reminderMessage: message,
+          lastReminded: new Date()
+        });
+        await payment.save();
+        io.emit('paymentCreated', payment);
+      } else {
+        // Update existing payment with reminder
+        payment.reminderMessage = message;
+        payment.lastReminded = new Date();
+        await payment.save();
+        io.emit('paymentUpdated', payment);
+      }
+      
+      // Also emit a specific reminder event for UI toast
+      io.emit('paymentReminder', {
+        userId: booking.userId,
+        message: message || `Payment reminder for ${month}`,
+        paymentId: payment._id,
+        amount: payment.amount
+      });
+      
+      remindersSent++;
+    }
+
+    res.json({ message: `Sent ${remindersSent} reminders` });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Update User Profile
+app.put('/api/users/:id', protect, async (req, res) => {
+  try {
+    if (req.user.id !== req.params.id) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+    
+    const user = await User.findOne({ id: req.params.id });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    
+    // Update allowed fields
+    const allowedUpdates = ['name', 'phoneNumber', 'address', 'guardianName', 'guardianPhone', 'gender'];
+    allowedUpdates.forEach(field => {
+      if (req.body[field] !== undefined) {
+        user[field] = req.body[field];
+      }
+    });
+
+    // Special case for phone mapping if frontend sends 'phone' instead of 'phoneNumber'
+    if (req.body.phone) user.phoneNumber = req.body.phone;
+    
+    await user.save();
+    
+    const { password: _, ...userWithoutPassword } = user.toObject();
+    res.json(userWithoutPassword);
   } catch (error) {
     res.status(400).json({ message: error.message });
   }

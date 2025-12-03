@@ -4,12 +4,11 @@ const visitorSchema = new mongoose.Schema({
   name: { type: String, required: true },
   phone: { type: String, required: true },
   purpose: { type: String, required: true },
-  whomToMeet: { type: String }, // Student Name
-  timeIn: { type: Date, default: Date.now },
-  timeOut: { type: Date },
+  roomNo: { type: String },
+  adharNo: { type: String }, // Added Adhar No
   
   // Linking fields
-  pgId: { type: String, required: true },
+  pgId: { type: String }, // Made optional as per request
   caretakerId: { type: String }, // ID of caretaker who logged this
 }, { timestamps: true });
 
