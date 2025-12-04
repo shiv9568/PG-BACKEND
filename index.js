@@ -57,6 +57,7 @@ const io = new Server(server, {
   cors: {
     origin: [
       "https://tajpg.vercel.app",
+      "https://tajpg-pwglk9jzh-shiv9568s-projects.vercel.app",
       "http://localhost:5173",
       "http://localhost:3000"
     ],
@@ -80,6 +81,7 @@ const PORT = process.env.PORT || 8000;
 app.use(cors({
   origin: [
     "https://tajpg.vercel.app",
+    "https://tajpg-pwglk9jzh-shiv9568s-projects.vercel.app",
     "http://localhost:5173",
     "http://localhost:3000"
   ],
