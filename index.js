@@ -1255,14 +1255,24 @@ if (process.env.NODE_ENV === 'production' && !process.env.MONGODB_URI) {
   process.exit(1);
 }
 
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/tajpg')
-.then(() => {
-  console.log('Connected to MongoDB');
-  seedUsers();
-  recalculateOccupancy();
-})
-.catch(err => console.error('Could not connect to MongoDB', err));
+const startServer = async () => {
+  try {
+    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/tajpg', {
+      serverSelectionTimeoutMS: 5000 // Fail faster if connection issues
+    });
+    console.log('Connected to MongoDB');
+    
+    // Run seed and recalculate tasks
+    await seedUsers();
+    await recalculateOccupancy();
 
-server.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+    server.listen(PORT, () => {
+      console.log(`Server is running on port ${PORT}`);
+    });
+  } catch (err) {
+    console.error('Could not connect to MongoDB:', err);
+    process.exit(1);
+  }
+};
+
+startServer();
